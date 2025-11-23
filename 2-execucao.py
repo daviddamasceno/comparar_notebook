@@ -34,7 +34,7 @@ driver = webdriver.Chrome(options=options)
 
 # --- 3. FUNÇÃO DE EXTRAÇÃO (Reutilizável para cada página) ---
 def extrair_dados_da_pagina(driver):
-    # Rola um pouco para garantir carregamento de imagens (lazy load)
+    # Rola para garantir que o Lazy Load carregue tudo
     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
     time.sleep(3)
     
@@ -43,32 +43,57 @@ def extrair_dados_da_pagina(driver):
     
     for card in cards:
         try:
-            # Modelo
+            # A. MODELO
             modelo = card.find_element(By.CSS_SELECTOR, "div.infos h4 a").get_attribute('innerText')
             
-            # Preço
-            preco_float = 0.0
+            # B. PREÇO (CORREÇÃO BRASIL)
+            preco_texto = "0"
             try:
+                # Tenta pegar preço verde
                 preco_el = card.find_element(By.CSS_SELECTOR, ".buy-box .lowest-price a")
                 preco_texto = preco_el.text
             except:
                 try:
+                    # Tenta pegar preço normal
                     preco_el = card.find_element(By.CSS_SELECTOR, ".buy-box .lowest-price-without-discounts p b")
                     preco_texto = preco_el.text
-                except: preco_texto = "0"
+                except: pass
             
-            preco_limpo = ''.join(c for c in preco_texto if c.isdigit() or c == '.')
-            preco_float = float(preco_limpo) if preco_limpo else 0.0
+            # TRATAMENTO DO PREÇO (O Segredo)
+            # 1. Tira o R$ e espaços
+            p_limpo = preco_texto.replace("R$", "").strip()
+            # 2. Tira o PONTO de milhar (3.529 vira 3529)
+            p_limpo = p_limpo.replace(".", "")
+            # 3. Troca a VÍRGULA decimal por PONTO (3529,99 vira 3529.99)
+            p_limpo = p_limpo.replace(",", ".")
+            
+            # Converte para float apenas se tiver números
+            if any(char.isdigit() for char in p_limpo):
+                preco_float = float(p_limpo)
+            else:
+                preco_float = 0.0
 
-            # Cupom
-            try: cupom = card.find_element(By.CSS_SELECTOR, ".coupon-code").text
-            except: cupom = ""
+            # C. CUPOM (CORREÇÃO DE LEITURA)
+            cupom = ""
+            try:
+                # Busca TODOS os elementos de cupom dentro do card
+                cupons_elements = card.find_elements(By.CSS_SELECTOR, ".coupon-code")
+                for c in cupons_elements:
+                    # textContent pega o texto mesmo se estiver oculto/overlay
+                    texto_cupom = c.get_attribute("textContent").strip()
+                    if texto_cupom:
+                        cupom = texto_cupom
+                        break # Achou um cupom válido, para de procurar
+            except: 
+                cupom = ""
 
-            # CPU/GPU/RAM
+            # D. SPECS
             try: cpu = card.find_element(By.CSS_SELECTOR, ".spec_stamp.cpu span").get_attribute('innerText').replace("\n", " ")
             except: cpu = "N/A"
+            
             try: gpu = card.find_element(By.CSS_SELECTOR, ".spec_stamp.gpu span").get_attribute('innerText').replace("\n", " ").replace("Dedicada", "").replace("GeForce", "").strip()
             except: gpu = "N/A"
+            
             ram = "N/A"
             try:
                 specs = card.find_elements(By.CSS_SELECTOR, ".spec_stamps.mobile span.spec_mobile")
@@ -81,25 +106,23 @@ def extrair_dados_da_pagina(driver):
             link = card.find_element(By.CSS_SELECTOR, "div.infos h4 a").get_attribute("href")
             
             dados_locais.append([modelo, preco_float, cupom, cpu, gpu, ram, link])
-        except:
+        except Exception as e:
+            # print(f"Erro num card: {e}") # Descomente para debugar
             continue
+            
     return dados_locais
 
-# --- 4. LÓGICA DE PAGINAÇÃO AUTOMÁTICA ---
+# --- 4. EXECUÇÃO COM PAGINAÇÃO ---
 base_url = "https://quenotebookcomprar.com.br/ofertas/?sort_order=_sfm_sale_lowest-price+asc+num&recomm=games-complex&_sfm_spec_laptop_category=Gamer&_sfm_spec_laptop_operating_system=Linux-%2B-Sem+sistema+operacional-%2B-Shell+EFI&post_types=notebooks"
 
 print(f"Acessando Página 1: {base_url}")
 driver.get(base_url)
-time.sleep(3)
+time.sleep(4)
 
-# Descobre o total de páginas
 total_paginas = 1
 try:
-    # Busca o texto "Página 1 de 3"
     texto_paginacao = driver.find_element(By.CSS_SELECTOR, "span.pages").text
-    print(f"📄 Informação encontrada: {texto_paginacao}")
-    
-    # Extrai o último número do texto (ex: "3")
+    print(f"📄 {texto_paginacao}")
     match = re.search(r"de (\d+)", texto_paginacao)
     if match:
         total_paginas = int(match.group(1))
@@ -107,33 +130,31 @@ try:
 except:
     print("⚠️ Paginação não encontrada, assumindo página única.")
 
-# --- 5. LOOP PRINCIPAL ---
 todos_dados = []
 
-# Loop de 1 até total_paginas
 for i in range(1, total_paginas + 1):
     if i > 1:
-        # Se não for a página 1, constrói a URL da página X
-        # O padrão do site é adicionar &sf_paged=NUMERO no final
         proxima_url = f"{base_url}&sf_paged={i}"
-        print(f"\n🔄 Navegando para Página {i}: {proxima_url}")
+        print(f"\n🔄 Indo para Página {i}...")
         driver.get(proxima_url)
-        time.sleep(3)
+        time.sleep(4)
     
-    print(f"Extraindo dados da página {i}...")
     dados_pagina = extrair_dados_da_pagina(driver)
     todos_dados.extend(dados_pagina)
-    print(f"📦 +{len(dados_pagina)} itens coletados.")
+    print(f"📦 Página {i}: {len(dados_pagina)} itens extraídos.")
 
 driver.quit()
 
-# --- 6. SALVAR ---
+# --- 5. SALVAR ---
 if todos_dados:
     headers = ["Modelo", "Preço", "Cupom", "CPU", "GPU", "RAM", "Link"]
     worksheet.clear()
     worksheet.append_row(headers)
     worksheet.append_rows(todos_dados)
+    
+    # Formatação (Opcional)
     worksheet.format("B:B", {"numberFormat": {"type": "CURRENCY", "pattern": "R$ #,##0.00"}})
-    print(f"\n✅ SUCESSO TOTAL! {len(todos_dados)} notebooks salvos na planilha.")
+    
+    print(f"\n✅ SUCESSO! {len(todos_dados)} notebooks salvos. Preços e cupons ajustados.")
 else:
     print("❌ Nenhum dado encontrado.")
