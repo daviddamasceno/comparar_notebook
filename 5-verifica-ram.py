@@ -4,9 +4,8 @@ from google.colab import auth
 import requests
 from bs4 import BeautifulSoup
 import time
-import re
 
-# --- 1. AUTENTICAÇÃO E LEITURA ---
+# --- 1. AUTENTICAÇÃO ---
 print("Autenticando...")
 auth.authenticate_user()
 creds, _ = default()
@@ -20,14 +19,14 @@ rows = worksheet.get_all_values()
 headers = rows[0]
 data = rows[1:]
 
-# Encontra a coluna de Link
+# Localiza a coluna de Link (geralmente a G)
 try:
     idx_link = headers.index("Link")
 except ValueError:
-    raise Exception("❌ Coluna 'Link' não encontrada. Rode o scraper principal primeiro.")
+    raise Exception("❌ Coluna 'Link' não encontrada na planilha.")
 
-# --- 2. FUNÇÃO DE EXTRAÇÃO DE RAM ---
-def extrair_detalhes_ram(url):
+# --- 2. FUNÇÃO DE EXTRAÇÃO (Lógica Validada) ---
+def extrair_detalhes_ram_final(url):
     headers_browser = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
@@ -35,7 +34,7 @@ def extrair_detalhes_ram(url):
     detalhes = {
         "geracao": "N/A",
         "soldada": "N/A",
-        "slots": "N/A",
+        "slots": "0",
         "maximo": "N/A"
     }
 
@@ -44,105 +43,87 @@ def extrair_detalhes_ram(url):
         if response.status_code != 200: return detalhes
         
         soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Localiza o bloco de memória
         div_ram = soup.select_one("div.spec-row.ram")
+        
         if not div_ram: return detalhes
 
-        # A. GERAÇÃO (DDR4 / DDR5)
-        # Procura em: <p class="spec_ram_installed_capacity_and_type">
+        # A. GERAÇÃO
         try:
-            texto_tipo = div_ram.select_one(".spec_ram_installed_capacity_and_type").get_text()
-            if "DDR5" in texto_tipo: detalhes["geracao"] = "DDR5"
-            elif "DDR4" in texto_tipo: detalhes["geracao"] = "DDR4"
-            elif "LPDDR5" in texto_tipo: detalhes["geracao"] = "LPDDR5"
-            elif "LPDDR4" in texto_tipo: detalhes["geracao"] = "LPDDR4"
-            else: detalhes["geracao"] = texto_tipo.replace("GB", "").strip()
+            txt = div_ram.select_one(".spec_ram_installed_capacity_and_type").get_text()
+            if "DDR5" in txt: detalhes["geracao"] = "DDR5"
+            elif "DDR4" in txt: detalhes["geracao"] = "DDR4"
+            elif "LPDDR" in txt: detalhes["geracao"] = txt.split(" ")[1] # Pega LPDDRx
+            else: detalhes["geracao"] = txt
         except: pass
 
         # B. MEMÓRIA MÁXIMA
-        # Procura em: <p class="spec_ram_max_capacity">
         try:
-            texto_max = div_ram.select_one(".spec_ram_max_capacity").get_text()
-            # Limpa "Máximo de " e deixa só "32 GB" ou "64 GB"
-            detalhes["maximo"] = texto_max.lower().replace("máximo de", "").replace("máximo", "").strip()
+            txt = div_ram.select_one(".spec_ram_max_capacity").get_text()
+            # Limpeza para deixar apenas "64 GB" ou "32 GB"
+            detalhes["maximo"] = txt.lower().replace("máximo de", "").replace("máximo", "").strip()
         except: pass
 
-        # C. É SOLDADA?
-        # Procura em: <li class="spec_ram_onboard">
+        # C. RAM SOLDADA (Verifica classes de indisponibilidade)
         try:
-            texto_soldada = div_ram.select_one(".spec_ram_onboard").get_text()
-            if "não possui" in texto_soldada.lower():
-                detalhes["soldada"] = "Não"
-            else:
-                detalhes["soldada"] = "Sim"
+            li_soldada = div_ram.select_one(".spec_ram_onboard")
+            if li_soldada:
+                classes = li_soldada.get("class", [])
+                texto = li_soldada.get_text().lower()
+                
+                if "not-available" in classes or "não possui" in texto:
+                    detalhes["soldada"] = "Não possui"
+                else:
+                    detalhes["soldada"] = "Sim"
         except: pass
 
-        # D. QUANTIDADE DE SLOTS
-        # Conta quantos <li> existem com classes que começam com 'spec_ram_slot_'
-        # Exemplo: spec_ram_slot_1, spec_ram_slot_2
+        # D. SLOTS (Conta apenas os ativos)
         try:
-            slots_encontrados = div_ram.select("li[class^='spec_ram_slot_']")
-            qtd_slots = len(slots_encontrados)
+            lista_slots = div_ram.select("li[class^='spec_ram_slot_']")
+            slots_reais = 0
+            for slot in lista_slots:
+                classes = slot.get("class", [])
+                texto = slot.get_text().lower()
+                # Só conta se NÃO estiver indisponível
+                if "not-available" not in classes and "não possui" not in texto:
+                    slots_reais += 1
             
-            # Verifica se algum slot diz "Não possui" (alguns modelos mostram o slot na lista mas dizem que não tem)
-            # Mas geralmente nesse site, se aparece na lista, é um slot físico (mesmo que vazio).
-            # Vamos assumir a contagem de LIs como slots físicos disponíveis na placa.
-            detalhes["slots"] = str(qtd_slots)
+            detalhes["slots"] = str(slots_reais)
         except: pass
 
     except Exception as e:
-        print(f"Erro na extração: {e}")
+        print(f"Erro leve: {e}")
     
     return detalhes
 
-# --- 3. LOOP DE ATUALIZAÇÃO ---
-print(f"Iniciando detalhamento de RAM para {len(data)} notebooks...")
-print("Isso vai levar alguns segundos por notebook...")
+# --- 3. LOOP DE PROCESSAMENTO ---
+print(f"Iniciando extração de RAM para sobrescrever colunas M, N, O, P...")
 
-novas_colunas_dados = []
-
-# Cabeçalhos das novas colunas
-novos_headers = ["Geração DDR", "RAM Soldada?", "Qtd Slots", "RAM Máxima"]
+novos_dados = []
+# Definição Fixa dos Cabeçalhos para M, N, O, P
+cabecalhos_ram = ["Geração DDR", "RAM Soldada", "Slots Ativos", "RAM Máxima"]
 
 for i, row in enumerate(data):
     link = row[idx_link]
     
     if link:
-        info = extrair_detalhes_ram(link)
-        linha_dados = [info["geracao"], info["soldada"], info["slots"], info["maximo"]]
-        print(f"[{i+1}/{len(data)}] {info['geracao']} | Max: {info['maximo']} | Slots: {info['slots']}")
+        info = extrair_detalhes_ram_final(link)
+        print(f"[{i+1}/{len(data)}] {info['geracao']} | Soldada: {info['soldada']} | Slots: {info['slots']}")
+        linha = [info["geracao"], info["soldada"], info["slots"], info["maximo"]]
     else:
-        linha_dados = ["N/A", "N/A", "N/A", "N/A"]
+        linha = ["N/A", "N/A", "N/A", "N/A"]
         
-    novas_colunas_dados.append(linha_dados)
-    # Pausa suave para não ser bloqueado
-    time.sleep(1)
+    novos_dados.append(linha)
+    time.sleep(0.5) # Delay para não sobrecarregar o servidor
 
-# --- 4. SALVANDO NO GOOGLE SHEETS ---
-print("\n💾 Salvando novas colunas na planilha...")
+# --- 4. SALVANDO NAS COLUNAS M, N, O, P ---
+print("\n💾 Sobrescrevendo colunas M:P na planilha...")
 
-# Determina onde começar a escrever (Coluna depois da última existente)
-# Vamos supor que você tem 12 colunas atualmente (A até L). A próxima é M (13).
-coluna_inicio_num = len(headers) + 1 
+# 1. Atualiza o Cabeçalho (Linha 1, Colunas M a P)
+worksheet.update(range_name="M1:P1", values=[cabecalhos_ram])
 
-# Função auxiliar para converter número em letra de coluna (13 -> M, 27 -> AA)
-def col_num_to_letter(n):
-    string = ""
-    while n > 0:
-        n, remainder = divmod(n - 1, 26)
-        string = chr(65 + remainder) + string
-    return string
+# 2. Atualiza os Dados (Linha 2 em diante, Colunas M a P)
+# O range final é P + número de linhas
+range_dados = f"M2:P{len(novos_dados) + 1}"
+worksheet.update(range_name=range_dados, values=novos_dados)
 
-letra_inicio = col_num_to_letter(coluna_inicio_num)
-letra_fim = col_num_to_letter(coluna_inicio_num + 3)
-
-# Atualiza Cabeçalhos
-range_header = f"{letra_inicio}1:{letra_fim}1"
-worksheet.update(range_name=range_header, values=[novos_headers])
-
-# Atualiza Dados
-range_dados = f"{letra_inicio}2:{letra_fim}{len(data)+1}"
-worksheet.update(range_name=range_dados, values=novas_colunas_dados)
-
-print("✅ Detalhamento de RAM concluído com sucesso!")
+print("✅ Colunas M, N, O e P atualizadas com sucesso!")
