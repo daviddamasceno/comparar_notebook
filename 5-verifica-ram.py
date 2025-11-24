@@ -18,7 +18,7 @@ except Exception as e:
     print(f"❌ Erro ao abrir planilha: {e}")
     raise e
 
-# --- 2. FUNÇÃO DE EXTRAÇÃO (LÓGICA ROBUSTA) ---
+# --- 2. FUNÇÃO DE EXTRAÇÃO (ATUALIZADA COM DETALHE DE SLOTS) ---
 def extrair_detalhes_ram(url):
     headers_browser = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -28,7 +28,9 @@ def extrair_detalhes_ram(url):
     detalhes = {
         "geracao": "N/A",
         "soldada": "Check Manual",
-        "slots": "0",
+        "slots_qtd": "0",
+        "slot1_val": "N/A", # Novo
+        "slot2_val": "N/A", # Novo
         "maximo": "N/A"
     }
 
@@ -56,7 +58,7 @@ def extrair_detalhes_ram(url):
             detalhes["maximo"] = txt.lower().replace("máximo de", "").replace("máximo", "").strip()
         except: pass
 
-        # C. SOLDADA (Validação de classe 'not-available')
+        # C. SOLDADA
         try:
             li_soldada = div_ram.select_one(".spec_ram_onboard")
             if li_soldada:
@@ -68,17 +70,43 @@ def extrair_detalhes_ram(url):
                     detalhes["soldada"] = "Sim"
         except: pass
 
-        # D. SLOTS (Validação um a um)
+        # D. SLOTS (CONTAGEM E CONTEÚDO)
         try:
+            # --- Contagem de Ativos ---
             lista_slots = div_ram.select("li[class^='spec_ram_slot_']")
             slots_reais = 0
             for slot in lista_slots:
                 classes = slot.get("class", [])
                 texto = slot.get_text().lower()
-                # Só conta se estiver ativo
                 if "not-available" not in classes and "não possui" not in texto:
                     slots_reais += 1
-            detalhes["slots"] = str(slots_reais)
+            detalhes["slots_qtd"] = str(slots_reais)
+
+            # --- Detalhe Slot 1 ---
+            li_s1 = div_ram.select_one(".spec_ram_slot_1")
+            if li_s1:
+                if "not-available" in li_s1.get("class", []) or "não possui" in li_s1.get_text().lower():
+                    detalhes["slot1_val"] = "Vazio"
+                else:
+                    # Tenta pegar o negrito (ex: <b>8 GB</b>)
+                    b_tag = li_s1.select_one("b")
+                    if b_tag: detalhes["slot1_val"] = b_tag.get_text(strip=True)
+                    else: detalhes["slot1_val"] = li_s1.get_text().replace("Slot 1:", "").strip()
+            else:
+                detalhes["slot1_val"] = "N/A"
+
+            # --- Detalhe Slot 2 ---
+            li_s2 = div_ram.select_one(".spec_ram_slot_2")
+            if li_s2:
+                if "not-available" in li_s2.get("class", []) or "não possui" in li_s2.get_text().lower():
+                    detalhes["slot2_val"] = "Vazio"
+                else:
+                    b_tag = li_s2.select_one("b")
+                    if b_tag: detalhes["slot2_val"] = b_tag.get_text(strip=True)
+                    else: detalhes["slot2_val"] = li_s2.get_text().replace("Slot 2:", "").strip()
+            else:
+                 detalhes["slot2_val"] = "N/A"
+
         except: pass
 
     except: pass
@@ -97,8 +125,8 @@ try:
 except:
     raise Exception("❌ Coluna 'Link' não encontrada.")
 
-# Definição das novas colunas
-colunas_ram = ["Geração DDR", "RAM Soldada", "Slots Ativos", "RAM Máxima"]
+# Definição das novas colunas NA ORDEM PEDIDA
+colunas_ram = ["Geração DDR", "RAM Soldada", "Slots Ativos", "Slot 1", "Slot 2", "RAM Máxima"]
 
 # Verifica se as colunas JÁ existem para não duplicar
 indices_ram = {}
@@ -115,7 +143,7 @@ for col in colunas_ram:
 print(f"Estrutura definida. Total de colunas: {len(novos_headers)}")
 
 # --- 4. LOOP DE PROCESSAMENTO E RECONSTRUÇÃO ---
-print("\n🔍 Extraindo dados de RAM (Isso garante a integridade da planilha)...")
+print("\n🔍 Extraindo dados detalhados de RAM...")
 
 dados_finais = [novos_headers] # Começa com o cabeçalho
 total = len(data)
@@ -129,12 +157,14 @@ for i, row in enumerate(data):
     
     if link:
         info = extrair_detalhes_ram(link)
-        print(f"[{i+1}/{total}] {info['geracao']} | Soldada: {info['soldada']} | Slots: {info['slots']}")
+        print(f"[{i+1}/{total}] {info['geracao']} | S1: {info['slot1_val']} | S2: {info['slot2_val']}")
         
-        # Atualiza os índices corretos (seja coluna nova ou existente)
+        # Atualiza os índices corretos
         row[indices_ram["Geração DDR"]] = info["geracao"]
         row[indices_ram["RAM Soldada"]] = info["soldada"]
-        row[indices_ram["Slots Ativos"]] = info["slots"]
+        row[indices_ram["Slots Ativos"]] = info["slots_qtd"]
+        row[indices_ram["Slot 1"]] = info["slot1_val"]
+        row[indices_ram["Slot 2"]] = info["slot2_val"]
         row[indices_ram["RAM Máxima"]] = info["maximo"]
     
     dados_finais.append(row)
@@ -145,13 +175,11 @@ print("\n💾 Salvando planilha completa...")
 worksheet.clear()
 worksheet.update(range_name='A1', values=dados_finais)
 
-# Refaz a formatação de preço (caso tenha se perdido no clear)
+# Refaz a formatação de preço
 try:
-    # Assume que Preço é coluna B, mas podemos achar dinamicamente
     idx_p = novos_headers.index("Preço")
-    # Converte indice 1 (B) para letra
     letra_p = chr(65 + idx_p) 
     worksheet.format(f"{letra_p}:{letra_p}", {"numberFormat": {"type": "CURRENCY", "pattern": "R$ #,##0.00"}})
 except: pass
 
-print("✅ Planilha atualizada! Dados de RAM inseridos/atualizados.")
+print("✅ Planilha atualizada! Colunas Slot 1 e Slot 2 adicionadas.")
