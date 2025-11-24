@@ -60,16 +60,14 @@ original_headers = rows[0]
 data = rows[1:]
 
 # Identifica as colunas base (Modelo, Preço... até Link)
-# Vamos assumir que as colunas fixas são as primeiras 7 (até 'Link')
-# Se você tiver mais colunas manuais antes dos calculos, ajuste o slice [:7]
 colunas_fixas = ["Modelo", "Preço", "Cupom", "CPU", "GPU", "RAM", "Link"]
 
 # Define os NOVOS cabeçalhos na ordem pedida
 novos_cabecalhos = colunas_fixas + [
     "Score CPU", 
-    "CB CPU",        # Novo
+    "CB CPU",        
     "Score GPU", 
-    "CB GPU",        # Novo
+    "CB GPU",        
     "Custo-Benefício Total"
 ]
 
@@ -78,7 +76,6 @@ try:
     idx_cpu = original_headers.index("CPU")
     idx_gpu = original_headers.index("GPU")
     idx_preco = original_headers.index("Preço")
-    # Mapeia as outras para garantir que não percamos dados se a ordem original mudar
     idx_modelo = original_headers.index("Modelo")
     idx_cupom = original_headers.index("Cupom")
     idx_ram = original_headers.index("RAM")
@@ -89,16 +86,12 @@ except ValueError:
 
 print("\n🔍 Calculando novas métricas...")
 dados_finais = []
-
-# Adiciona o novo cabeçalho na lista final
 dados_finais.append(novos_cabecalhos)
 
 count = 0
 for row in data:
     count += 1
     
-    # 1. Recupera dados base da linha original
-    # (Usamos try/except para garantir que a linha tenha dados suficientes)
     try:
         modelo = row[idx_modelo]
         preco_raw = row[idx_preco]
@@ -107,17 +100,30 @@ for row in data:
         gpu_txt = row[idx_gpu]
         ram = row[idx_ram]
         link = row[idx_link]
-    except: continue # Pula linhas quebradas
+    except: continue 
 
-    # 2. Tratamento de Preço
+    # 2. Tratamento e VALIDAÇÃO de Preço
+    preco = 0.0
+    preco_valido = False
+    
     try:
         if isinstance(preco_raw, str):
+            # Remove R$, pontos e troca vírgula por ponto
             p = preco_raw.replace("R$", "").replace(".", "").replace(",", ".").strip()
-            preco = float(p) if p else 1.0
-        else: preco = float(preco_raw)
-    except: preco = 1.0
+            # Remove qualquer caractere não numérico que tenha sobrado
+            p = ''.join(c for c in p if c.isdigit() or c == '.')
+            preco = float(p) if p else 0.0
+        else: 
+            preco = float(preco_raw)
+    except: 
+        preco = 0.0
     
-    if preco < 100: preco = 1.0 # Evita distorções de preço zero/erro
+    # --- A CORREÇÃO PRINCIPAL ---
+    # Se o preço for menor que 100 (ex: 0, 1, ou muito baixo), consideramos inválido para cálculo
+    if preco > 100:
+        preco_valido = True
+    else:
+        preco_valido = False
 
     # 3. Match CPU
     score_cpu = 0
@@ -134,31 +140,37 @@ for row in data:
         if match_info[1] < 80: match_info = process.extractOne(busca, lista_gpus)
         if match_info[1] > 75: score_gpu = gpu_db[match_info[0]]
 
-    # 5. CÁLCULOS (Multiplicador 1000 para legibilidade)
-    # CB CPU (Individual)
-    cb_cpu = round((score_cpu / preco) * 1000, 2)
-    
-    # CB GPU (Individual)
-    cb_gpu = round((score_gpu / preco) * 1000, 2)
-    
-    # CB Total (Ponderado 40/60)
-    pontos_misto = (score_cpu * 0.4) + (score_gpu * 0.6)
-    cb_total = round((pontos_misto / preco) * 1000, 2)
+    # 5. CÁLCULOS (Só executa se o preço for válido)
+    if preco_valido:
+        # CB CPU (Individual)
+        cb_cpu = round((score_cpu / preco) * 1000, 2)
+        
+        # CB GPU (Individual)
+        cb_gpu = round((score_gpu / preco) * 1000, 2)
+        
+        # CB Total (Ponderado 40/60)
+        pontos_misto = (score_cpu * 0.4) + (score_gpu * 0.6)
+        cb_total = round((pontos_misto / preco) * 1000, 2)
+    else:
+        # Se o preço for inválido (ex: 1), zera tudo para não poluir o ranking
+        cb_cpu = 0.0
+        cb_gpu = 0.0
+        cb_total = 0.0
 
-    # 6. Monta a nova linha na ordem dos novos cabeçalhos
+    # 6. Monta a nova linha
     nova_linha = [
         modelo, 
-        preco, 
+        preco if preco_valido else 0, # Salva 0 se for inválido para ficar claro visualmente
         cupom, 
         cpu_txt, 
         gpu_txt, 
         ram, 
         link,
-        score_cpu,  # Coluna 8
-        cb_cpu,     # Coluna 9
-        score_gpu,  # Coluna 10
-        cb_gpu,     # Coluna 11
-        cb_total    # Coluna 12
+        score_cpu, 
+        cb_cpu,     
+        score_gpu,  
+        cb_gpu,     
+        cb_total    
     ]
     
     dados_finais.append(nova_linha)
@@ -166,10 +178,12 @@ for row in data:
 
 # --- 4. SALVAR ---
 print("\n💾 Salvando na planilha...")
-worksheet.clear() # Limpa tudo para garantir a nova ordem das colunas
+# ATENÇÃO: Isso vai apagar as colunas de RAM detalhada se você rodar isso depois do script de RAM
+# Recomendo rodar este script PRIMEIRO e depois o de RAM, ou ajustar o intervalo de escrita.
+# Vou limpar e escrever do zero para garantir a integridade dos cálculos.
+worksheet.clear() 
 worksheet.update(range_name='A1', values=dados_finais)
 
-# Formatação de Moeda (B) e Cores Condicionais (opcional, mas ajuda)
 worksheet.format("B:B", {"numberFormat": {"type": "CURRENCY", "pattern": "R$ #,##0.00"}})
 
-print("✅ Planilha atualizada com sucesso! Verifique as novas colunas.")
+print("✅ Planilha atualizada! Notebooks com preço simbólico (1.00) agora têm CB zerado.")
