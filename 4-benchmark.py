@@ -13,7 +13,6 @@ auth.authenticate_user()
 creds, _ = default()
 gc = gspread.authorize(creds)
 
-# Abre sua planilha
 try:
     sh = gc.open('Notebooks_Scraper')
     worksheet = sh.worksheet('Dados')
@@ -21,171 +20,156 @@ except Exception as e:
     print(f"❌ Erro ao abrir planilha: {e}")
     raise e
 
-# --- 2. FUNÇÃO OTIMIZADA (SEM SELENIUM) ---
+# --- 2. BAIXAR BENCHMARKS (MÉTODO RÁPIDO) ---
 def baixar_tabela_benchmark_rapido(url, tipo="CPU"):
-    print(f"📥 Baixando dados de {tipo} via Requests (Modo Turbo)...")
-    
-    # Cabeçalho para fingir ser um navegador (evita bloqueio 403)
+    print(f"📥 Baixando dados de {tipo}...")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-    
     try:
         response = requests.get(url, headers=headers, timeout=20)
-        if response.status_code != 200:
-            print(f"⚠️ Erro ao acessar {url}: Status {response.status_code}")
-            return {}
-            
         soup = BeautifulSoup(response.text, 'html.parser')
-        
         dados = {}
-        # O seletor do PassMark geralmente é uma lista 'chartlist'
         rows = soup.select("ul.chartlist li")
-        
         for row in rows:
             try:
-                # Nome: span com classe prdname
-                nome_el = row.select_one("span.prdname")
-                # Score: span com classe count
-                score_el = row.select_one("span.count")
-                
-                if nome_el and score_el:
-                    nome = nome_el.get_text(strip=True)
-                    score_texto = score_el.get_text(strip=True).replace(",", "")
-                    score = int(score_texto)
-                    
-                    # Limpeza para melhorar o match
-                    nome_limpo = nome.replace("Intel", "").replace("AMD", "").replace("NVIDIA", "").strip()
-                    dados[nome_limpo] = score
-            except:
-                continue
-                
+                nome = row.select_one("span.prdname").get_text(strip=True)
+                score = int(row.select_one("span.count").get_text(strip=True).replace(",", ""))
+                # Limpeza para facilitar o match
+                nome_limpo = nome.replace("Intel", "").replace("AMD", "").replace("NVIDIA", "").strip()
+                dados[nome_limpo] = score
+            except: continue
         print(f"✅ {len(dados)} {tipo}s carregados.")
         return dados
+    except: return {}
 
-    except Exception as e:
-        print(f"❌ Erro crítico no download: {e}")
-        return {}
-
-# --- 3. BAIXANDO AS BASES ---
-print("Iniciando downloads dos Benchmarks...")
-
-# URLs Oficiais do PassMark
+# Executa Downloads
 cpu_db = baixar_tabela_benchmark_rapido("https://www.cpubenchmark.net/high_end_cpus.html", "CPU")
-# Se a CPU não estiver na lista High End, pegamos a Mid Range também
-cpu_db_mid = baixar_tabela_benchmark_rapido("https://www.cpubenchmark.net/mid_range_cpus.html", "CPU_MID")
-cpu_db.update(cpu_db_mid)
+cpu_db.update(baixar_tabela_benchmark_rapido("https://www.cpubenchmark.net/mid_range_cpus.html", "CPU_MID"))
 
 gpu_db = baixar_tabela_benchmark_rapido("https://www.videocardbenchmark.net/high_end_gpus.html", "GPU")
-gpu_db_mid = baixar_tabela_benchmark_rapido("https://www.videocardbenchmark.net/mid_range_gpus.html", "GPU_MID")
-gpu_db.update(gpu_db_mid)
+gpu_db.update(baixar_tabela_benchmark_rapido("https://www.videocardbenchmark.net/mid_range_gpus.html", "GPU_MID"))
 
-# --- 4. LENDO E PREPARANDO A PLANILHA ---
-print("\n📖 Lendo seus notebooks da planilha...")
+lista_cpus = list(cpu_db.keys())
+lista_gpus = list(gpu_db.keys())
+
+# --- 3. PROCESSAMENTO DA PLANILHA ---
+print("\n📖 Lendo planilha e reestruturando colunas...")
 rows = worksheet.get_all_values()
-headers = rows[0]
+original_headers = rows[0]
 data = rows[1:]
 
-# Mapeia colunas
-try:
-    idx_cpu = headers.index("CPU")
-    idx_gpu = headers.index("GPU")
-    idx_preco = headers.index("Preço")
-    
-    # Cria colunas de score se não existirem
-    if "Score CPU" not in headers:
-        print("🔧 Criando colunas de Score...")
-        headers.extend(["Score CPU", "Score GPU", "Custo-Benefício"])
-        worksheet.update('1:1', [headers])
-        # Recalcula índices
-        idx_score_cpu = len(headers) - 3
-        idx_score_gpu = len(headers) - 2
-        idx_cb = len(headers) - 1
-    else:
-        idx_score_cpu = headers.index("Score CPU")
-        idx_score_gpu = headers.index("Score GPU")
-        idx_cb = headers.index("Custo-Benefício")
+# Identifica as colunas base (Modelo, Preço... até Link)
+# Vamos assumir que as colunas fixas são as primeiras 7 (até 'Link')
+# Se você tiver mais colunas manuais antes dos calculos, ajuste o slice [:7]
+colunas_fixas = ["Modelo", "Preço", "Cupom", "CPU", "GPU", "RAM", "Link"]
 
+# Define os NOVOS cabeçalhos na ordem pedida
+novos_cabecalhos = colunas_fixas + [
+    "Score CPU", 
+    "CB CPU",        # Novo
+    "Score GPU", 
+    "CB GPU",        # Novo
+    "Custo-Benefício Total"
+]
+
+# Mapeia índices das colunas originais para leitura
+try:
+    idx_cpu = original_headers.index("CPU")
+    idx_gpu = original_headers.index("GPU")
+    idx_preco = original_headers.index("Preço")
+    # Mapeia as outras para garantir que não percamos dados se a ordem original mudar
+    idx_modelo = original_headers.index("Modelo")
+    idx_cupom = original_headers.index("Cupom")
+    idx_ram = original_headers.index("RAM")
+    idx_link = original_headers.index("Link")
 except ValueError:
-    print("❌ Erro: Verifique se as colunas CPU, GPU e Preço existem na aba 'Dados'.")
+    print("❌ Erro: Faltam colunas básicas (CPU, GPU, Preço, Link, etc). Rode o scraper novamente.")
     raise
 
-# --- 5. CRUZAMENTO DE DADOS (FUZZY MATCH) ---
-print("\n🔍 Calculando pontuações e custo-benefício...")
+print("\n🔍 Calculando novas métricas...")
+dados_finais = []
 
-novos_dados = []
-lista_cpus_passmark = list(cpu_db.keys())
-lista_gpus_passmark = list(gpu_db.keys())
+# Adiciona o novo cabeçalho na lista final
+dados_finais.append(novos_cabecalhos)
 
-contador = 0
-total = len(data)
-
+count = 0
 for row in data:
-    contador += 1
-    # Garante tamanho da linha
-    while len(row) < len(headers):
-        row.append("")
-        
-    notebook_cpu = row[idx_cpu]
-    notebook_gpu = row[idx_gpu]
+    count += 1
     
-    # Trata preço (R$ 3.500,00 -> 3500.0)
-    preco_raw = row[idx_preco]
+    # 1. Recupera dados base da linha original
+    # (Usamos try/except para garantir que a linha tenha dados suficientes)
+    try:
+        modelo = row[idx_modelo]
+        preco_raw = row[idx_preco]
+        cupom = row[idx_cupom] if len(row) > idx_cupom else ""
+        cpu_txt = row[idx_cpu]
+        gpu_txt = row[idx_gpu]
+        ram = row[idx_ram]
+        link = row[idx_link]
+    except: continue # Pula linhas quebradas
+
+    # 2. Tratamento de Preço
     try:
         if isinstance(preco_raw, str):
-            # Remove R$, ponto de milhar e troca vírgula por ponto
             p = preco_raw.replace("R$", "").replace(".", "").replace(",", ".").strip()
             preco = float(p) if p else 1.0
-        else:
-            preco = float(preco_raw)
-    except:
-        preco = 1.0
-
-    # 1. SCORE CPU
-    score_cpu = 0
-    if notebook_cpu and notebook_cpu != "N/A":
-        # Remove marcas para facilitar o match
-        busca = notebook_cpu.replace("Intel", "").replace("AMD", "").replace("Core", "").strip()
-        # Procura o melhor match
-        match, nota = process.extractOne(busca, lista_cpus_passmark)
-        if nota > 80:
-            score_cpu = cpu_db[match]
-        # else: print(f"  [CPU Baixa Confiança] {notebook_cpu} -> {match} ({nota}%)")
-
-    # 2. SCORE GPU
-    score_gpu = 0
-    if notebook_gpu and notebook_gpu != "N/A":
-        busca = notebook_gpu.replace("NVIDIA", "").replace("GeForce", "").replace("Dedicada", "").strip()
-        # Truque: Tentar forçar 'Laptop GPU' pois o PassMark separa desktop de mobile
-        match_info = process.extractOne(busca + " Laptop GPU", lista_gpus_passmark)
-        
-        # Se não achar bom match com "Laptop GPU", tenta normal
-        if match_info[1] < 80:
-             match_info = process.extractOne(busca, lista_gpus_passmark)
-             
-        if match_info[1] > 75:
-            score_gpu = gpu_db[match_info[0]]
-
-    # 3. CÁLCULO FINAL (Sua Fórmula)
-    # (CPU * 0.4 + GPU * 0.6) / Preço
-    if preco > 100:
-        performance_mista = (score_cpu * 0.4) + (score_gpu * 0.6)
-        # Multiplico por 1000 apenas para ficar um número mais legível (Ex: 8.5 em vez de 0.0085)
-        cb = round((performance_mista / preco) * 1000, 2)
-    else:
-        cb = 0
-
-    # Atualiza a linha
-    row[idx_score_cpu] = score_cpu
-    row[idx_score_gpu] = score_gpu
-    row[idx_cb] = cb
+        else: preco = float(preco_raw)
+    except: preco = 1.0
     
-    novos_dados.append(row)
-    if contador % 10 == 0:
-        print(f"Processado {contador}/{total} notebooks...")
+    if preco < 100: preco = 1.0 # Evita distorções de preço zero/erro
 
-# --- 6. SALVAR ---
-print("\n💾 Salvando dados atualizados no Google Sheets...")
-# Atualiza da linha 2 até o fim (preserva cabeçalho)
-worksheet.update(range_name='A2', values=novos_dados)
-print("✅ Concluído! Pode abrir a planilha e ordenar pela coluna 'Custo-Benefício'.")
+    # 3. Match CPU
+    score_cpu = 0
+    if cpu_txt and cpu_txt != "N/A":
+        busca = cpu_txt.replace("Intel", "").replace("AMD", "").replace("Core", "").strip()
+        match, nota = process.extractOne(busca, lista_cpus)
+        if nota > 80: score_cpu = cpu_db[match]
+
+    # 4. Match GPU
+    score_gpu = 0
+    if gpu_txt and gpu_txt != "N/A":
+        busca = gpu_txt.replace("NVIDIA", "").replace("GeForce", "").replace("Dedicada", "").strip()
+        match_info = process.extractOne(busca + " Laptop GPU", lista_gpus)
+        if match_info[1] < 80: match_info = process.extractOne(busca, lista_gpus)
+        if match_info[1] > 75: score_gpu = gpu_db[match_info[0]]
+
+    # 5. CÁLCULOS (Multiplicador 1000 para legibilidade)
+    # CB CPU (Individual)
+    cb_cpu = round((score_cpu / preco) * 1000, 2)
+    
+    # CB GPU (Individual)
+    cb_gpu = round((score_gpu / preco) * 1000, 2)
+    
+    # CB Total (Ponderado 40/60)
+    pontos_misto = (score_cpu * 0.4) + (score_gpu * 0.6)
+    cb_total = round((pontos_misto / preco) * 1000, 2)
+
+    # 6. Monta a nova linha na ordem dos novos cabeçalhos
+    nova_linha = [
+        modelo, 
+        preco, 
+        cupom, 
+        cpu_txt, 
+        gpu_txt, 
+        ram, 
+        link,
+        score_cpu,  # Coluna 8
+        cb_cpu,     # Coluna 9
+        score_gpu,  # Coluna 10
+        cb_gpu,     # Coluna 11
+        cb_total    # Coluna 12
+    ]
+    
+    dados_finais.append(nova_linha)
+    if count % 10 == 0: print(f"Processado {count}...")
+
+# --- 4. SALVAR ---
+print("\n💾 Salvando na planilha...")
+worksheet.clear() # Limpa tudo para garantir a nova ordem das colunas
+worksheet.update(range_name='A1', values=dados_finais)
+
+# Formatação de Moeda (B) e Cores Condicionais (opcional, mas ajuda)
+worksheet.format("B:B", {"numberFormat": {"type": "CURRENCY", "pattern": "R$ #,##0.00"}})
+
+print("✅ Planilha atualizada com sucesso! Verifique as novas colunas.")
